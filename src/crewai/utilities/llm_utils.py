@@ -1,6 +1,8 @@
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Dict, Any
+from typing import Optional, Union
 
+import tiktoken
 from crewai.cli.constants import DEFAULT_LLM_MODEL, ENV_VARS, LITELLM_PARAMS
 from crewai.llm import LLM, BaseLLM
 
@@ -194,3 +196,64 @@ def _normalize_key_name(key_name: str) -> str:
         if pattern in key_name:
             return pattern
     return key_name
+
+
+
+def truncate_messages_to_token_limit(
+    messages: List[Dict[str, Any]],
+    model: str = "gpt-5",
+    max_tokens: int = 20_000,
+) -> List[Dict[str, Any]]:
+    """
+    Keep the most recent messages whose *content* fits within max_tokens.
+    - Walks from the end (most recent) backwards.
+    - If adding a message would push the sum over max_tokens, stop there and
+      drop that message and everything older.
+    - Returns the truncated list in the original chronological order.
+    """
+    # robust encoding fallback
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
+
+    def extract_text(msg: Dict[str, Any]) -> str:
+        """
+        Handles OpenAI-style message content:
+        - If content is str -> use it
+        - If content is list of parts -> join text parts
+        - Else -> best-effort string cast
+        """
+        c = msg.get("content", "")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            parts = []
+            for part in c:
+                if isinstance(part, dict):
+                    # prefer 'text' field if present, else stringify
+                    if "text" in part and isinstance(part["text"], str):
+                        parts.append(part["text"])
+                    elif "content" in part and isinstance(part["content"], str):
+                        parts.append(part["content"])
+                    else:
+                        parts.append(str(part))
+                else:
+                    parts.append(str(part))
+            return "\n".join(parts)
+        return str(c)
+
+    total = 0
+    kept_reversed = []
+
+    # iterate from most recent to oldest
+    for msg in reversed(messages):
+        text = extract_text(msg)
+        token_count = len(enc.encode(text))
+        if total + token_count > max_tokens:
+            break  # drop this one and everything older
+        kept_reversed.append(msg)
+        total += token_count
+
+    # put back to chronological order
+    return list(reversed(kept_reversed))

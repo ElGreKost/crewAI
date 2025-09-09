@@ -36,6 +36,8 @@ from crewai.events.types.tool_usage_events import (
     ToolUsageErrorEvent,
 )
 
+from .utilities.llm_utils import truncate_messages_to_token_limit
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", UserWarning)
     import litellm
@@ -314,6 +316,7 @@ class LLM(BaseLLM):
         callbacks: List[Any] | None = None,
         reasoning_effort: Optional[Literal["none", "low", "medium", "high"]] = None,
         stream: bool = False,
+        token_rate_limit: Optional[int] = None,
         **kwargs,
     ):
         self.model = model
@@ -340,6 +343,7 @@ class LLM(BaseLLM):
         self.additional_params = kwargs
         self.is_anthropic = self._is_anthropic_model(model)
         self.stream = stream
+        self.token_rate_limit = token_rate_limit
 
         litellm.drop_params = True
 
@@ -385,6 +389,8 @@ class LLM(BaseLLM):
         # --- 1) Format messages according to provider requirements
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
+        if self.token_rate_limit is not None:
+            messages = truncate_messages_to_token_limit(messages, self.model, self.token_rate_limit)
         formatted_messages = self._format_messages_for_provider(messages)
 
         # --- 2) Prepare the parameters for the completion call
