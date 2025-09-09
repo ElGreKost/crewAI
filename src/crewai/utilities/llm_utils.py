@@ -199,31 +199,31 @@ def _normalize_key_name(key_name: str) -> str:
 
 
 
+from typing import List, Dict, Any
+import tiktoken
+
 def truncate_messages_to_token_limit(
     messages: List[Dict[str, Any]],
     model: str = "gpt-5",
     max_tokens: int = 20_000,
 ) -> List[Dict[str, Any]]:
     """
-    Keep the most recent messages whose *content* fits within max_tokens.
+    Keep the most recent OpenAI-format messages whose *content* fits within max_tokens.
     - Walks from the end (most recent) backwards.
-    - If adding a message would push the sum over max_tokens, stop there and
-      drop that message and everything older.
-    - Returns the truncated list in the original chronological order.
+    - If adding a message would exceed max_tokens, stop there and drop that message and everything older.
+    - If the latest (last) message alone exceeds max_tokens -> raise ValueError.
+    - Returns the truncated list in chronological order.
     """
-    # robust encoding fallback
+    if not messages:
+        return messages
+
+    # get encoding (fallback just in case)
     try:
         enc = tiktoken.encoding_for_model(model)
     except Exception:
         enc = tiktoken.get_encoding("cl100k_base")
 
     def extract_text(msg: Dict[str, Any]) -> str:
-        """
-        Handles OpenAI-style message content:
-        - If content is str -> use it
-        - If content is list of parts -> join text parts
-        - Else -> best-effort string cast
-        """
         c = msg.get("content", "")
         if isinstance(c, str):
             return c
@@ -231,10 +231,9 @@ def truncate_messages_to_token_limit(
             parts = []
             for part in c:
                 if isinstance(part, dict):
-                    # prefer 'text' field if present, else stringify
-                    if "text" in part and isinstance(part["text"], str):
+                    if isinstance(part.get("text"), str):
                         parts.append(part["text"])
-                    elif "content" in part and isinstance(part["content"], str):
+                    elif isinstance(part.get("content"), str):
                         parts.append(part["content"])
                     else:
                         parts.append(str(part))
@@ -243,17 +242,31 @@ def truncate_messages_to_token_limit(
             return "\n".join(parts)
         return str(c)
 
+    # Precompute token counts per message (content only)
+    token_counts = [len(enc.encode(extract_text(m))) for m in messages]
+
+    # If the latest message alone exceeds the cap -> hard fail (your ask)
+    if token_counts[-1] > max_tokens:
+        raise ValueError(
+            f"Latest message has {token_counts[-1]} tokens, exceeds max_tokens={max_tokens}."
+        )
+
     total = 0
     kept_reversed = []
 
-    # iterate from most recent to oldest
-    for msg in reversed(messages):
-        text = extract_text(msg)
-        token_count = len(enc.encode(text))
-        if total + token_count > max_tokens:
-            break  # drop this one and everything older
+    # Walk from newest to oldest
+    for msg, tcount in zip(reversed(messages), reversed(token_counts)):
+        # Would adding this message overflow?
+        if total + tcount > max_tokens:
+            # Drop this one AND everything older (which fixes the 'oldest offender' case)
+            break
         kept_reversed.append(msg)
-        total += token_count
+        total += tcount
 
-    # put back to chronological order
+    # If nothing is kept (shouldn’t happen because we guarded latest>limit), be safe:
+    if not kept_reversed:
+        # This would only happen with weird edge cases (e.g., zero-length limit).
+        raise ValueError("No messages fit within the token limit.")
+
+    # Return chronological order
     return list(reversed(kept_reversed))
